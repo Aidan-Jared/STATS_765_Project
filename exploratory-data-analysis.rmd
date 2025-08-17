@@ -1,0 +1,624 @@
+---
+title: STATS 765 - Where are the Crimes? - Milestone 2
+author: Sujay Anjankar - 2433337734
+toc-title: Table of Contents
+---
+
+
+```{r setup, include=FALSE}
+## Setup
+library(tidyverse)
+library(GGally)
+library(leaps)
+path <- "~/Documents/Workspace/2025-s2-stats-765/data"
+```
+
+## Load Files
+
+Data Source:
+
+|Dataset|Source|
+|--|--|
+|Census|https://2023census-statsnz.hub.arcgis.com/maps/7d8a5993db144f95bf9be2f64b14e467/about|
+|Meshblock|https://datafinder.stats.govt.nz/layer/111224-meshblock-higher-geographies-2023-generalised/|
+|Victimisations|https://public.tableau.com/app/profile/policedata.nz/viz/VictimisationsTimeandPlace/Summary (Redirected from policedata.nz)|
+
+Special Values:
+
+| Value  | Meaning                           |
+| ------ | --------------------------------- |
+| `-997` | Data not collected                |
+| `-999` | Suppressed due to confidentiality |
+
+
+```{r load-files, cache = TRUE}
+df_victimizations <- read_csv(
+    paste(path, "/victimizations-data.csv", sep = ""),
+    na = c("", "NA"), show_col_types = FALSE
+)
+
+df_census <- read_csv(
+    paste(path, "/2023-census-totals-by-topic-for-households-by-statistical-ar.csv", sep = ""),
+    # Read the special values as NA for simplicity.
+    na = c("", "NA", -999, -997), show_col_types = FALSE
+)
+
+df_meshblock <- read_csv(
+    paste(path, "/meshblock-higher-geographies-2023-generalized.csv", sep = ""),
+    na = c("", "NA"), show_col_types = FALSE
+)
+dim(df_census)
+dim(df_meshblock)
+dim(df_victimizations)
+describe(df_victimizations)
+```
+
+## Cleanup
+
+### Victimizations
+
+```{r cleanup-victimizations, cache = TRUE}
+# Find all columns which only have 1 distinct value.
+single_value_column_names <- df_victimizations |>
+    summarize(across(everything(), ~ n_distinct(.))) |>
+    # This anonymous function keeps only those columns in the tibble which have value = 1.
+    select(where(~ 1 == .x)) |>
+    names()
+
+# Remove these columns.
+df_victimizations <- df_victimizations |>
+    # Rename meshblock while at it.
+    rename(meshblock = Meshblock) |>
+    select(-all_of(single_value_column_names))
+
+# Year Month and Year Month (copy 2) likely to contain the same values.
+print(
+    df_victimizations |>
+        select(c(`Year Month`, `Year Month (copy 2)`)) |>
+        mutate(diff = `Year Month` != `Year Month (copy 2)`) |>
+        filter(diff == TRUE) |>
+        summarize(n = n())
+)
+
+# Since the above returns a 0 count, drop that column.
+df_victimizations <- df_victimizations |> select(-c(`Year Month (copy 2)`)) |>
+    # Extract the year to join with the census data.
+    mutate(year = as.numeric(str_sub(`Year Month`, start = -4L, end = -1L))) |>
+    # Remove excess columns not relevant to analysis.
+    select(
+        -c(`Month Year`, `Occurrence Day Of Week`, `Occurrence Hour Of Day`, `Territorial Authority`, `Location Type`)
+    )
+
+# Final list of columns
+colnames(df_victimizations)
+```
+
+### Meshblock
+
+```{r cleanup-meshblock, cache = TRUE}
+colnames(df_meshblock)
+df_meshblock <- df_meshblock |>
+    # This dataset is to just join the two datasets, so drop any excess columns.
+    select(c(MB2023_V1_00, SA22023_V1_00, SA22023_V1_00_NAME)) |>
+    # The meshblock is a string here, so it needs to be converted to a numeric column before joining.
+    mutate(meshblock = as.numeric(MB2023_V1_00)) |> # Rename it to meshblock for ease of joining.
+    rename(
+        sa2_code = SA22023_V1_00,
+        sa2_name = SA22023_V1_00_NAME
+    ) |>
+    select(-MB2023_V1_00)
+
+# Unlikely to have columns that only have 1 distinct values in this data, check anyway.
+print(
+    df_meshblock |>
+        summarize(across(everything(), ~ n_distinct(.))) |>
+        # This anonymous function keeps only those columns in the tibble which have value = 1.
+        select(where(~ 1 == .x)) |>
+        names()
+) # Returns nothing.
+```
+
+### Census
+
+```{r cleanup-census, cache = TRUE}
+# The column names are excessively long, shorten them for readability.
+
+single_value_colnames_census <- df_census |>
+    summarize(across(everything(), ~ n_distinct(.))) |>
+    # This anonymous function keeps only those columns in the tibble which have value = 1.
+    select(where(~ 1 == .x)) |>
+    names()
+
+# Determine the distinct values available for these columns.
+print(
+    df_census |>
+        select(all_of(single_value_colnames_census)) |>
+        distinct() |>
+        as.data.frame()
+)
+
+# Since all of these are NA values, meaning the data is not available, we remove these columns.
+df_census <- df_census |>
+    select(-all_of(single_value_colnames_census))
+
+df_census <- df_census |>
+    # Rename overly long columns.
+    rename_with(
+        ~ .x |>
+            str_replace("Subject pop: Households in rented occupied private dwellings, Year: ", "Rentals - ") |>
+            str_replace("Subject pop: Households in occupied private dwellings, Year: ", "Households - ") |>
+            str_replace(", Measure: Count, Var1:", " -") |>
+            str_replace(", Measure: Median, Var1: ", " - Median: ") |>
+            str_replace(", Measure: Mean, Var1: ", " - Median: ") |>
+            str_replace(" paid by household", "") |>
+            str_replace("Total household income", "Income") |>
+            str_replace("Sector of landlord", "Landlord") |>
+            str_replace("Tenure of household", "Tenure") |>
+            str_replace("Number of usual residents in household", "# of Residents") |>
+            str_replace("Household crowding index", "Crowding Index") |>
+            str_replace("Household composition", "Composition") |>
+            str_replace("Access to telecommunication systems", "Telecom Access") |>
+            str_replace("Number of motor vehicles", "Vehicle Count") |>
+            str_replace("Count of households in occupied private dwellings", "Household Count")
+    ) |>
+    # Drop other columns not required to the analysis.
+    select(-c(
+        OBJECTID,
+        `Statistical area 2 (SA2) 2023 name no macrons`,
+        `Area square kilometres`,
+        `Land area square kilometres`,
+        `Shape__Area`,
+        `Shape__Length`
+    )) |>
+    rename(
+        sa2_code = `Statistical area 2 (SA2) 2023 code`,
+        sa2_name = `Statistical area 2 (SA2) 2023 name`
+    )
+```
+
+### Check Available Years
+
+```{r filtering-by-year}
+df_victimizations |>
+    select(year) |>
+    distinct()
+# The only available victimization data is from 2023, so drop the columns from the census data from other years.
+df_victimizations <- df_victimizations |> filter(year == 2023)
+df_census <- df_census |>
+    select(!matches("2013|2018")) |>
+    # Since it is all 2023 data, remove the year from column names.
+    rename_with(~ .x |> str_replace(" - 2023", ""))
+```
+
+## Join Datasets
+
+```{r join-all, cache = TRUE}
+df_merge <- inner_join(
+    df_census,
+    inner_join(
+        df_victimizations, df_meshblock,
+        by = "meshblock"
+    ),
+    by = c("sa2_code", "sa2_name")
+)
+dim(df_merge)
+```
+
+## Visualizations
+
+### Distribution of Committed Offenses
+
+```{r visualization-1, cache = TRUE}
+# Most committed offenses
+df_merge |>
+    group_by(`ANZSOC Division`) |>
+    summarize(count_by_subdivision = n(), .groups = "drop") |>
+    ggplot(aes(x = "", y = count_by_subdivision, fill = `ANZSOC Division`)) +
+    geom_bar(stat = "identity", width = 1) +
+    scale_fill_viridis_d(direction = -1) +
+    coord_polar("y", start = 0) +
+    labs(
+        title = "Distribution of Committed Offenses",
+        x = "",
+        y = ""
+    ) +
+    theme_minimal()
+```
+
+### Criminal Activity Hotspots
+
+```{r visualization-2, cache = TRUE}
+# Areas with a high prevalence of crime
+knitr::kable(
+    df_merge |>
+        group_by(sa2_name) |>
+        summarize(count_by_sa2 = n(), .groups = "drop") |>
+        slice_max(n = 10, order_by = count_by_sa2),
+    col.names = c("Statistical Area 2 Name", "Number of Victimizations")
+)
+```
+
+### Household Count
+
+#### Overall Crime Rate / 1000 Households in Large Areas
+
+```{r visualization-3, cache = TRUE}
+total_number_of_households <- sum(df_merge$`Households - Household Count (Total)`)
+# Consider a 0.1% of the total household count as the threshold to identify large SA2s.
+threshold <- total_number_of_households * 0.001
+
+knitr::kable(
+    df_merge |>
+        # Filter all NAs
+        filter(
+            !is.na(Victimisations),
+            !is.na(`Households - Household Count (Total)`)
+        ) |>
+        group_by(sa2_code, sa2_name) |>
+        summarize(
+            total_victimisations = sum(Victimisations),
+            households = sum(`Households - Household Count (Total)`),
+            .groups = "drop"
+        ) |>
+        filter(households > threshold) |>
+        mutate(
+            # Crime rate per 1,000 households
+            crime_rate_per_1000hh = (total_victimisations / households) * 1000
+        ) |>
+        select(-sa2_code) |>
+        arrange(desc(crime_rate_per_1000hh)) |>
+        head(n = 10),
+    col.names = c("SA2 Name", "Victimizations", "Households", "CR / 1000 HH")
+)
+```
+
+
+### Household Income
+
+#### Median Household Income vs Total Crimes by Neighborhood
+
+Observation: Number of victimizations is observed to trend downwards with an increase in median household income.
+
+```{r income-vs-crimes, fig.width=10, fig.height=6, cache=TRUE}
+df_merge |>
+    group_by(sa2_name) |>
+    summarize(
+        `Median household income ($)` = median(`Households - Median: Income (Median ($))`, na.rm = TRUE),
+        total_crime = sum(Victimisations, na.rm = TRUE)
+    ) |>
+    ggplot(aes(x = `Median household income ($)`, y = total_crime, size = total_crime)) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm") +
+    labs(
+        title = "Median Household Income vs Total Crimes by Neighborhood",
+        x = "Median household income ($)",
+        y = "Total Victimisations"
+    )
+```
+
+### Telecom Access
+
+#### Communication Access vs Total Crimes by Neighborhood
+
+```{r telecom-vs-crimes, fig.width=10, fig.height=6, cache=TRUE}
+df_merge |>
+    group_by(sa2_name) |>
+    summarize(
+        `No Access to Telecom (%)` = sum(`Households - Telecom Access (No access to telecommunication systems)`,
+            na.rm = TRUE
+        ) /
+            sum(`Households - Telecom Access (Total stated)`, na.rm = TRUE) * 100,
+        total_crime = sum(Victimisations, na.rm = TRUE)
+    ) |>
+    ggplot(aes(x = `No Access to Telecom (%)`, y = total_crime, size = total_crime)) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm", color = "blue", se = FALSE) +
+    xlim(0, 10) +
+    ylim(0, 1000) +
+    labs(
+        title = "Telecom Access Rate vs Total Crimes by Neighborhood",
+        x = "No Access to Telecom (%)",
+        y = "Total Victimisations"
+    ) +
+    theme_minimal()
+```
+
+### Crowding Index
+
+#### Crowding Rates vs Total Crimes by Neighborhood
+
+```{r crowding-vs-crimes, fig.width=10, fig.height=6, cache=TRUE}
+df_merge |>
+    group_by(sa2_name) |>
+    summarize(
+        `Crowded (%)` =
+            sum(`Households - Crowding Index (Crowded)`, na.rm = TRUE)
+            / sum(`Households - Crowding Index (Total stated)`, na.rm = TRUE) * 100,
+        `Not Crowded (%)` =
+            sum(`Households - Crowding Index (Not crowded)`, na.rm = TRUE)
+            / sum(`Households - Crowding Index (Total stated)`, na.rm = TRUE) * 100,
+        total_crime = sum(Victimisations, na.rm = TRUE)
+    ) |>
+    pivot_longer(
+        cols = c(`Crowded (%)`, `Not Crowded (%)`),
+        names_to = "attribute",
+        values_to = "value"
+    ) |>
+    ggplot(aes(x = value, y = total_crime)) +
+    geom_point(alpha = 0.7) +
+    geom_smooth(method = "lm", se = FALSE, color = "blue") +
+    facet_wrap(~attribute, scales = "free_x") +
+    labs(
+        title = "Crowding vs Total Crimes by Neighborhood",
+        x = NULL,
+        y = "Total Victimisations"
+    )
+```
+
+### Rental Landlord Type
+
+#### Landlord Sector vs Total Crimes
+
+```{r landlord-vs-crimes, fig.width=10, fig.height=6, cache=TRUE}
+df_merge |>
+    group_by(sa2_name) |>
+    summarize(
+        `Private (%)` = sum(`Rentals - Landlord (Private person, trust, or business)`, na.rm = TRUE)
+        / sum(`Rentals - Landlord (Total stated)`, na.rm = TRUE) * 100,
+        `Local authority (%)` = sum(`Rentals - Landlord (Local authority or city council)`, na.rm = TRUE)
+        / sum(`Rentals - Landlord (Total stated)`, na.rm = TRUE) * 100,
+        `Kāinga Ora (%)` = sum(`Rentals - Landlord (Kāinga Ora/Housing NZ)`, na.rm = TRUE)
+        / sum(`Rentals - Landlord (Total stated)`, na.rm = TRUE) * 100,
+        `Iwi, hapū, or Māori land trust (%)` = sum(`Rentals - Landlord (Iwi, hapū, or Māori land trust)`, na.rm = TRUE)
+        / sum(`Rentals - Landlord (Total stated)`, na.rm = TRUE) * 100,
+        `Others (%)` = sum(`Rentals - Landlord (Other community housing provider)`, na.rm = TRUE) +
+            sum(`Rentals - Landlord (Not elsewhere included)`, na.rm = TRUE) +
+            sum(
+                `Rentals - Landlord (Other state-owned corporation or state-owned enterprise, or government department or ministry)`,
+                na.rm = TRUE
+            ) / sum(`Rentals - Landlord (Total stated)`, na.rm = TRUE) * 100,
+        total_crime = sum(Victimisations, na.rm = TRUE)
+    ) |>
+    pivot_longer(
+        cols = c(
+            `Private (%)`,
+            `Local authority (%)`,
+            `Kāinga Ora (%)`,
+            `Iwi, hapū, or Māori land trust (%)`,
+            `Others (%)`
+        ),
+        names_to = "attribute",
+        values_to = "value"
+    ) |>
+    ggplot(aes(x = value, y = total_crime)) +
+    geom_point(alpha = 0.7) +
+    geom_smooth(method = "lm", se = FALSE, color = "blue") +
+    facet_wrap(~attribute, scales = "free_x") +
+    labs(
+        title = "Landlord Sector vs Total Crimes by Neighborhood",
+        x = NULL,
+        y = "Total Victimisations"
+    )
+```
+
+### Weekly Rent
+
+#### Weekly Rental ($) vs Total Crimes
+
+```{r rental-vs-crimes, fig.width=10, fig.height=6, cache=TRUE}
+df_merge |>
+    group_by(sa2_name) |>
+    summarize(
+        `Median Weekly Rent ($)` = median(`Rentals - Median: Weekly rent (Median ($))`, na.rm = TRUE),
+        total_crime = sum(Victimisations, na.rm = TRUE)
+    ) |>
+    ggplot(aes(x = `Median Weekly Rent ($)`, y = total_crime)) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm") +
+    labs(
+        title = "Median Weekly Rent vs Total Crimes by Neighborhood",
+        x = "Median weekly rental ($)",
+        y = "Total Victimisations"
+    )
+```
+
+#### Faceting
+
+```{r low-rent-vs-high-rent, fig.width=10, fig.height=6, cache=TRUE}
+df_merge |>
+    group_by(sa2_name) |>
+    summarize(
+        `Low Rent (%)` = (
+            sum(`Rentals - Weekly rent (Under $200)`, na.rm = TRUE) +
+                sum(`Rentals - Weekly rent ($200 - $299)`, na.rm = TRUE) +
+                sum(`Rentals - Weekly rent ($300 - $399)`, na.rm = TRUE) +
+                sum(`Rentals - Weekly rent ($400 - $499)`, na.rm = TRUE)
+        ) * 100 /
+            sum(`Rentals - Weekly rent (Total stated)`, na.rm = TRUE),
+        `High Rent (%)` = (
+            sum(`Rentals - Weekly rent ($400 - $499)`, na.rm = TRUE) +
+                sum(`Rentals - Weekly rent ($500 - $599)`, na.rm = TRUE) +
+                sum(`Rentals - Weekly rent ($600 - $699)`, na.rm = TRUE) +
+                sum(`Rentals - Weekly rent ($700 - $799)`, na.rm = TRUE) +
+                sum(`Rentals - Weekly rent ($800 and over)`, na.rm = TRUE)
+        ) * 100 /
+            sum(`Rentals - Weekly rent (Total stated)`, na.rm = TRUE),
+        total_crime = sum(Victimisations, na.rm = TRUE)
+    ) |>
+    pivot_longer(
+        cols = c(`High Rent (%)`, `Low Rent (%)`),
+        names_to = "attribute",
+        values_to = "value"
+    ) |>
+    ggplot(aes(x = value, y = total_crime)) +
+    geom_point(alpha = 0.7) +
+    scale_color_viridis_c() +
+    geom_smooth(method = "lm", se = FALSE, color = "blue") +
+    facet_wrap(~attribute, scales = "free_x") +
+    labs(
+        title = "Rental vs Total Crimes by Neighborhood",
+        x = NULL,
+        y = "Total Victimisations"
+    )
+```
+
+### Vehicle Ownership
+
+### Car Theft
+
+```{r car-theft} 
+knitr::kable(df_merge |> group_by(`ANZSOC Division`) |> summarize(n = sum(Victimisations)) |> arrange(desc(n)))
+
+df_merge |>
+    filter(`ANZSOC Subdivision` == "Motor vehicle theft and related offences") |>
+    group_by(sa2_name) |>
+    summarize(
+        `No Vehicle (%)` =
+            sum(`Households - Vehicle Count (No motor vehicle)`, na.rm = TRUE)
+            * 100 / sum(`Households - Vehicle Count (Total stated)`, na.rm = TRUE),
+        `> 1 Vehicle (%)` = (
+            sum(`Households - Vehicle Count (Total stated)`, na.rm = TRUE)
+            - sum(`Households - Vehicle Count (No motor vehicle)`, na.rm = TRUE)
+        ) * 100 / sum(`Households - Vehicle Count (Total stated)`, na.rm = TRUE),
+        total_crime = sum(Victimisations, na.rm = TRUE)
+    ) |>
+    pivot_longer(
+        cols = c(`No Vehicle (%)`, `> 1 Vehicle (%)`),
+        names_to = "attribute",
+        values_to = "value"
+    ) |>
+    ggplot(aes(x = value, y = total_crime)) +
+    geom_point(alpha = 0.7) +
+    geom_smooth(method = "lm", se = FALSE, color = "blue") +
+    facet_wrap(~attribute, scales = "free_x") +
+    labs(
+        title = "Vehicle Ownership vs Car vehicular Offenses",
+        x = NULL,
+        y = "Total Victimisations"
+    )
+```
+
+### Misc Panel Chart - 1
+
+```{r}
+ggpairs(
+    df_merge |>
+        filter(`ANZSOC Subdivision` == "Motor vehicle theft and related offences") |>
+        select(c(`Victimisations`, `Households - Vehicle Count (No motor vehicle)`)),
+    title = "Scatterplot Matrix",
+    lower = list(continuous = wrap("smooth", alpha = 0.5, size = 0.8)),
+    upper = list(continuous = wrap("cor", size = 3)),
+    diag = list(continuous = wrap("densityDiag")),
+    cardinality_threshold = 20
+) +
+    theme_minimal()
+```
+
+### Misc Panel Chart - 2
+
+```{r}
+df_merge |>
+    select(c(`Victimisations`, `Households - Vehicle Count (Three motor vehicles)`)) |>
+    mutate("log_vic" = log(Victimisations)) |>
+    select(-Victimisations) |>
+    ggpairs(
+        title = "Scatterplot Matrix",
+        lower = list(continuous = wrap("smooth", alpha = 0.5, size = 0.8)),
+        upper = list(continuous = wrap("cor", size = 3)),
+        diag = list(continuous = wrap("densityDiag")),
+        cardinality_threshold = 20
+    ) +
+    theme_minimal()
+```
+
+## Correlation Calculator
+
+```{r}
+# Apply transformation to explanatory variable if requested
+exp_var <- df_merge$Victimisations
+transform <- "log"
+explanatory <- "Victimisations"
+
+# Prepare results storage
+results <- data.frame(
+    variable = character(),
+    correlation = numeric(),
+    p_value = numeric(),
+    stringsAsFactors = FALSE
+)
+
+# Loop through numeric columns except explanatory variable
+for (col_name in names(df_merge)) {
+    if (col_name != explanatory && is.numeric(df_merge[[col_name]])) {
+        col_data <- df_merge[[col_name]]
+
+        # Apply same transform to target variable if requested
+        if (!is.null(transform)) {
+            if (transform == "log") {
+                col_data <- log(col_data + 1)
+            } else if (transform == "sqrt") {
+                col_data <- sqrt(col_data)
+            }
+        }
+
+        test <- cor.test(col_data, exp_var, use = "pairwise")
+        results <- rbind(results, data.frame(
+            variable = col_name,
+            correlation = test$estimate,
+            p_value = test$p.value,
+            stringsAsFactors = FALSE
+        ))
+    }
+}
+
+# Sort by absolute correlation
+results <- results[order(abs(results$correlation), decreasing = TRUE), ]
+knitr::kable(head(results, n = 10))
+```
+
+
+```{r}
+df_merge |>
+    select(c(`Households - Vehicle Count (Three motor vehicles)`, `Victimisations`)) |>
+    mutate(log_car = log(`Households - Vehicle Count (Three motor vehicles)`)) |>
+    ggplot(aes(x = log_car, y = Victimisations)) +
+    geom_point() +
+    geom_smooth(method = "lm")
+
+
+df_lm <- df_merge |>
+    select(c(`Households - Vehicle Count (Three motor vehicles)`, `Victimisations`)) |>
+    filter(`Households - Vehicle Count (Three motor vehicles)` > 0, !is.na(`Victimisations`))
+car_lm <- lm(log(`Households - Vehicle Count (Three motor vehicles)`) ~ Victimisations, data = df_lm)
+summary(car_lm)
+```
+
+```{r}
+df_merge |>
+    group_by(sa2_name) |>
+    summarize(
+        `Median household income ($)` = median(`Households - Median: Income (Median ($))`, na.rm = TRUE),
+        total_crime = sum(Victimisations, na.rm = TRUE),
+        crowding_rate = (
+            sum(`Households - Crowding Index (Crowded)`, na.rm = TRUE) +
+                sum(`Households - Crowding Index (Two or more bedrooms needed (severely crowded))`, na.rm = TRUE) +
+                sum(`Households - Crowding Index (One bedroom needed (crowded))`, na.rm = TRUE)
+        ) * 100 / sum(`Households - Crowding Index (Total stated)`, na.rm = TRUE)
+    ) |>
+    ggplot(aes(
+        x = `Median household income ($)`,
+        y = total_crime,
+        size = crowding_rate,
+        color = crowding_rate
+    )) +
+    geom_point(alpha = 0.6) +
+    geom_smooth(method = "lm", se = FALSE, color = "black") +
+    scale_color_viridis_c(name = "Crowding rate (%)") +
+    scale_size(name = "Crowding rate (%)") +
+    labs(
+        title = "Income vs Crime with Crowding Rate as Size & Color",
+        x = "Median household income ($)",
+        y = "Total Victimisations"
+    ) +
+    theme_minimal()
+```
